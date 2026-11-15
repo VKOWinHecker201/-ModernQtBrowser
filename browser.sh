@@ -2,7 +2,8 @@
 set -e
 
 # ==============================================================================
-# ModernQtBrowser - Automated Project Generator & Build TUI (Native KDE Edition)
+# ModernQtBrowser - Automated Project Generator & Build TUI
+# Full Suite: KDE Native UI + AdBlocker + Bundles A, B & C
 # ==============================================================================
 
 PROJECT_DIR="ModernQtBrowser"
@@ -32,7 +33,7 @@ generate_project_files() {
     info "Writing CMakeLists.txt..."
     cat << 'EOF' > "${PROJECT_DIR}/CMakeLists.txt"
 cmake_minimum_required(VERSION 3.16)
-project(ModernQtBrowser VERSION 1.0.0 LANGUAGES CXX)
+project(ModernQtBrowser VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +46,7 @@ find_package(Qt6 REQUIRED COMPONENTS
     Gui
     Widgets
     Network
+    PrintSupport
     WebEngineCore
     WebEngineWidgets
 )
@@ -60,6 +62,7 @@ target_link_libraries(ModernQtBrowser PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Network
+    Qt6::PrintSupport
     Qt6::WebEngineCore
     Qt6::WebEngineWidgets
 )
@@ -115,7 +118,7 @@ endif()
 include(CPack)
 EOF
 
-    info "Writing native KDE-themed main.cpp (with Omnibox Auto-Complete & Tab Context Menu)..."
+    info "Writing full-featured main.cpp (Bundles A, B, and C integrated)..."
     cat << 'EOF' > "${PROJECT_DIR}/main.cpp"
 #include <QApplication>
 #include <QMainWindow>
@@ -136,6 +139,7 @@ EOF
 #include <QPushButton>
 #include <QLabel>
 #include <QFileDialog>
+#include <QMessageBox>
 #include <QSplitter>
 #include <QSettings>
 #include <QDateTime>
@@ -143,12 +147,16 @@ EOF
 #include <QStyle>
 #include <QPalette>
 #include <QEvent>
+#include <QCloseEvent>
 #include <QPoint>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QRegularExpression>
 #include <QAction>
 #include <QMenu>
 #include <QSet>
+#include <QStack>
+#include <QTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -158,6 +166,9 @@ EOF
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <atomic>
 
 #include <QWebEngineView>
@@ -171,6 +182,10 @@ EOF
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+#include <QWebEnginePermission>
+#endif
 
 class BrowserWindow;
 
@@ -200,7 +215,7 @@ public:
     void updateFilterLists() {
         const QUrl easyListUrl("https://easylist.to/easylist/easylist.txt");
         QNetworkRequest req(easyListUrl);
-        req.setHeader(QNetworkRequest::UserAgentHeader, "ModernQtBrowser/1.0");
+        req.setHeader(QNetworkRequest::UserAgentHeader, "ModernQtBrowser/2.0");
 
         emit statusMessage("Downloading EasyList filter rules...");
         QNetworkReply *reply = m_netManager->get(req);
@@ -399,7 +414,7 @@ private:
 };
 
 // ----------------------------------------------------------------------------
-// Custom WebView: Handles target="_blank" links & popups inside new tabs
+// Custom WebView: Enables PDF Viewer, Screen Capture & New Tab Popups
 // ----------------------------------------------------------------------------
 class BrowserTabView : public QWebEngineView {
     Q_OBJECT
@@ -409,6 +424,8 @@ public:
         setPage(new QWebEnginePage(profile, this));
         settings()->setAttribute(QWebEngineSettings::FullScreenSupportEnabled, true);
         settings()->setAttribute(QWebEngineSettings::PluginsEnabled, true);
+        settings()->setAttribute(QWebEngineSettings::PdfViewerEnabled, true);
+        settings()->setAttribute(QWebEngineSettings::ScreenCaptureEnabled, true);
         settings()->setAttribute(QWebEngineSettings::JavascriptCanOpenWindows, true);
         settings()->setAttribute(QWebEngineSettings::ScrollAnimatorEnabled, true);
     }
@@ -422,16 +439,20 @@ private:
 };
 
 // ----------------------------------------------------------------------------
-// Main Browser Window (Follows System / KDE Plasma Theme & Breeze Icons)
+// Main Browser Window (KDE Plasma Theme + Bundles A, B & C)
 // ----------------------------------------------------------------------------
 class BrowserWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit BrowserWindow(bool incognito = false, QWidget *parent = nullptr)
-        : QMainWindow(parent), m_isIncognito(incognito) {
+        : QMainWindow(parent),
+          m_isIncognito(incognito),
+          m_suggestNetManager(new QNetworkAccessManager(this)),
+          m_suggestDebounce(new QTimer(this)) {
+
         setWindowTitle(m_isIncognito ? "ModernQtBrowser (Private Browsing)" : "ModernQtBrowser");
         setWindowIcon(QIcon::fromTheme("applications-internet", style()->standardIcon(QStyle::SP_DriveNetIcon)));
-        resize(1280, 820);
+        resize(1320, 860);
 
         if (m_isIncognito) {
             m_profile = new QWebEngineProfile(this);
@@ -442,6 +463,11 @@ public:
 
         connect(m_profile, &QWebEngineProfile::downloadRequested,
                 this, &BrowserWindow::onDownloadRequested);
+
+        // Configure live search autocomplete debounce timer (180ms)
+        m_suggestDebounce->setSingleShot(true);
+        m_suggestDebounce->setInterval(180);
+        connect(m_suggestDebounce, &QTimer::timeout, this, &BrowserWindow::fetchLiveSearchSuggestions);
 
         setupUI();
         setupShortcuts();
@@ -458,7 +484,6 @@ public:
                 m_adBlockAction->setToolTip(
                     QString("AdBlocker Active (%1 blocked)\nLast blocked: %2\nClick to toggle")
                         .arg(totalBlocked).arg(domain));
-                statusBar()->showMessage(QString("Shield blocked %1 (%2 total)").arg(domain).arg(totalBlocked), 1500);
             }
         }, Qt::QueuedConnection);
 
@@ -466,10 +491,13 @@ public:
             statusBar()->showMessage(msg, 5000);
         });
 
-        addNewTab(QUrl("https://www.wikipedia.org"));
+        // Bundle A: Restore previous session tabs (or open Speed Dial if none/Private)
+        if (!restoreSession()) {
+            addNewTab(QUrl("about:newtab"));
+        }
     }
 
-    BrowserTabView *addNewTab(const QUrl &url = QUrl("https://www.duckduckgo.com")) {
+    BrowserTabView *addNewTab(const QUrl &url = QUrl("about:newtab")) {
         QSplitter *tabSplitter = new QSplitter(Qt::Vertical, this);
         BrowserTabView *webView = new BrowserTabView(m_profile, this, tabSplitter);
 
@@ -489,7 +517,7 @@ public:
                     m_tabs->setTabToolTip(idx, title + " (Pinned)");
                 } else {
                     QString shortTitle = title.left(24) + (title.length() > 24 ? "..." : "");
-                    m_tabs->setTabText(idx, shortTitle.isEmpty() ? "Loading..." : shortTitle);
+                    m_tabs->setTabText(idx, shortTitle.isEmpty() ? "New Tab" : shortTitle);
                     m_tabs->setTabToolTip(idx, title);
                 }
             }
@@ -510,9 +538,17 @@ public:
             updateTabIcon(tabSplitter, webView);
         });
 
+        connect(webView->page(), &QWebEnginePage::lifecycleStateChanged, this, [this, tabSplitter, webView]() {
+            updateTabIcon(tabSplitter, webView);
+        });
+
         connect(webView, &QWebEngineView::urlChanged, this, [this, webView](const QUrl &qurl) {
             if (currentWebView() == webView) {
-                m_urlBar->setText(qurl.toString());
+                if (qurl.toString() == "about:newtab") {
+                    m_urlBar->clear();
+                } else {
+                    m_urlBar->setText(qurl.toString());
+                }
                 updateSecurityIcon(qurl);
                 updateNavigationActions();
             }
@@ -535,26 +571,80 @@ public:
             }
         });
 
-        connect(webView->page(), &QWebEnginePage::linkHovered, this, [this](const QString &url) {
-            statusBar()->showMessage(url, 3000);
+        connect(webView->page(), &QWebEnginePage::linkHovered, this, [this](const QString &linkUrl) {
+            statusBar()->showMessage(linkUrl, 3000);
         });
 
         connect(webView->page(), &QWebEnginePage::fullScreenRequested, this, [this](QWebEngineFullScreenRequest req) {
             req.accept();
             if (req.toggleOn()) {
                 m_navBar->hide();
+                m_bookmarksBar->hide();
                 m_tabs->tabBar()->hide();
                 statusBar()->hide();
                 showFullScreen();
             } else {
                 m_navBar->show();
+                if (m_bookmarksBarVisible) m_bookmarksBar->show();
                 m_tabs->tabBar()->show();
                 statusBar()->show();
                 showNormal();
             }
         });
 
-        if (url.isValid()) {
+        // Bundle C: Hardware & Feature Permission Prompts (Camera, Mic, Geolocation, Notifications, Screen Share)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        connect(webView->page(), &QWebEnginePage::permissionRequested, this, [this](QWebEnginePermission perm) {
+            QString featureName = "a device feature";
+            switch (perm.permissionType()) {
+                case QWebEnginePermission::PermissionType::MediaAudioCapture: featureName = "your Microphone"; break;
+                case QWebEnginePermission::PermissionType::MediaVideoCapture: featureName = "your Camera"; break;
+                case QWebEnginePermission::PermissionType::MediaAudioVideoCapture: featureName = "your Camera and Microphone"; break;
+                case QWebEnginePermission::PermissionType::DesktopVideoCapture:
+                case QWebEnginePermission::PermissionType::DesktopAudioVideoCapture: featureName = "Screen Sharing"; break;
+                case QWebEnginePermission::PermissionType::Geolocation: featureName = "your Location"; break;
+                case QWebEnginePermission::PermissionType::Notifications: featureName = "Desktop Notifications"; break;
+                case QWebEnginePermission::PermissionType::ClipboardReadWrite: featureName = "your Clipboard"; break;
+                default: break;
+            }
+            auto reply = QMessageBox::question(
+                this, "Website Permission Request",
+                QString("<b>%1</b> wants to access <b>%2</b>.<br><br>Do you want to allow this?")
+                    .arg(perm.origin().host(), featureName),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (reply == QMessageBox::Yes) perm.grant();
+            else perm.deny();
+        });
+#else
+        connect(webView->page(), &QWebEnginePage::featurePermissionRequested,
+                this, [this, webView](const QUrl &securityOrigin, QWebEnginePage::Feature feature) {
+            QString featureName = "a device feature";
+            switch (feature) {
+                case QWebEnginePage::MediaAudioCapture: featureName = "your Microphone"; break;
+                case QWebEnginePage::MediaVideoCapture: featureName = "your Camera"; break;
+                case QWebEnginePage::MediaAudioVideoCapture: featureName = "your Camera and Microphone"; break;
+                case QWebEnginePage::DesktopVideoCapture:
+                case QWebEnginePage::DesktopAudioVideoCapture: featureName = "Screen Sharing"; break;
+                case QWebEnginePage::Geolocation: featureName = "your Location"; break;
+                case QWebEnginePage::Notifications: featureName = "Desktop Notifications"; break;
+                default: break;
+            }
+            auto reply = QMessageBox::question(
+                this, "Website Permission Request",
+                QString("<b>%1</b> wants to access <b>%2</b>.<br><br>Do you want to allow this?")
+                    .arg(securityOrigin.host(), featureName),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            webView->page()->setFeaturePermission(
+                securityOrigin, feature,
+                reply == QMessageBox::Yes ? QWebEnginePage::PermissionGrantedByUser
+                                          : QWebEnginePage::PermissionDeniedByUser);
+        });
+#endif
+
+        // Bundle B: Load Speed Dial dashboard on about:newtab
+        if (url.isEmpty() || url.toString() == "about:newtab") {
+            loadSpeedDial(webView);
+        } else if (url.isValid()) {
             webView->setUrl(url);
         }
         return webView;
@@ -564,8 +654,21 @@ protected:
     void changeEvent(QEvent *event) override {
         if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange) {
             syncWebThemeWithSystemPalette();
+            // Refresh any open Speed Dial tabs so their colors match the new KDE palette
+            for (int i = 0; i < m_tabs->count(); ++i) {
+                if (auto *v = webViewAt(i)) {
+                    if (v->url().toString() == "about:newtab") loadSpeedDial(v);
+                }
+            }
         }
         QMainWindow::changeEvent(event);
+    }
+
+    // Bundle A: Save open tabs & pinned states on window close
+    void closeEvent(QCloseEvent *event) override {
+        saveSession();
+        saveStoredData();
+        QMainWindow::closeEvent(event);
     }
 
 private slots:
@@ -573,10 +676,14 @@ private slots:
         QString input = m_urlBar->text().trimmed();
         if (input.isEmpty()) return;
 
-        // If populated by QCompleter ("Page Title | https://..."), extract the clean URL
         if (input.contains(" | ")) {
             input = input.section(" | ", -1).trimmed();
             m_urlBar->setText(input);
+        }
+
+        if (input == "about:newtab") {
+            if (auto *v = currentWebView()) loadSpeedDial(v);
+            return;
         }
 
         QUrl targetUrl;
@@ -600,6 +707,14 @@ private slots:
             return;
         }
 
+        // Bundle A: Push closed tab URL onto the undo stack for Ctrl+Shift+T
+        if (auto *view = webViewAt(index)) {
+            const QUrl closedUrl = view->url();
+            if (closedUrl.isValid() && closedUrl.toString() != "about:newtab" && !closedUrl.isEmpty()) {
+                m_closedTabs.push(closedUrl);
+            }
+        }
+
         if (m_tabs->count() <= 1) {
             close();
             return;
@@ -607,6 +722,159 @@ private slots:
         QWidget *widget = m_tabs->widget(index);
         m_tabs->removeTab(index);
         widget->deleteLater();
+    }
+
+    // Bundle A: Reopen most recently closed tab (Ctrl+Shift+T)
+    void restoreClosedTab() {
+        if (m_closedTabs.isEmpty()) {
+            statusBar()->showMessage("No recently closed tabs to reopen", 2500);
+            return;
+        }
+        QUrl url = m_closedTabs.pop();
+        addNewTab(url);
+        statusBar()->showMessage("Reopened closed tab: " + url.toString(), 2500);
+    }
+
+    // Bundle A: Hibernate (Discard) background tab to free Chromium RAM
+    void hibernateTab(int index) {
+        BrowserTabView *webView = webViewAt(index);
+        if (!webView) return;
+
+        if (m_tabs->currentIndex() == index) {
+            if (m_tabs->count() <= 1) {
+                statusBar()->showMessage("Open another tab before hibernating the active tab.", 3000);
+                return;
+            }
+            // Switch to an adjacent tab before discarding the active tab's renderer
+            int nextIdx = (index == 0) ? 1 : index - 1;
+            m_tabs->setCurrentIndex(nextIdx);
+        }
+
+        webView->page()->setLifecycleState(QWebEnginePage::LifecycleState::Discarded);
+        updateTabIcon(m_tabs->widget(index), webView);
+        statusBar()->showMessage("Tab hibernated — memory freed until clicked", 3000);
+    }
+
+    // Bundle C: Toggle Distraction-Free Reader Mode
+    void toggleReaderMode() {
+        BrowserTabView *view = currentWebView();
+        if (!view || view->url().toString() == "about:newtab") return;
+
+        const bool isDark = palette().color(QPalette::Window).lightness() < 128;
+        const QString bgHex = palette().color(QPalette::Base).name();
+        const QString fgHex = palette().color(QPalette::Text).name();
+        const QString accentHex = palette().color(QPalette::Highlight).name();
+
+        QString js = QString(R"(
+            (function() {
+                if (window.__modernQtReaderActive) {
+                    location.reload();
+                    return "EXIT";
+                }
+                const root = document.querySelector('article, main, [role="main"], .post-content, .article-body') || document.body;
+                const title = document.title;
+                const clone = root.cloneNode(true);
+                clone.querySelectorAll('script, style, nav, header, footer, aside, iframe, form, .sidebar, .ad, .comments').forEach(e => e.remove());
+
+                document.head.innerHTML = `<meta charset="utf-8"><title>${title} — Reader Mode</title>
+                    <style>
+                        body {
+                            background: %1; color: %2;
+                            font-family: 'Noto Serif', Georgia, serif;
+                            max-width: 740px; margin: 48px auto; padding: 0 24px;
+                            line-height: 1.75; font-size: 19px;
+                        }
+                        h1, h2, h3 { font-family: 'Noto Sans', system-ui, sans-serif; line-height: 1.3; }
+                        h1 { border-bottom: 2px solid %3; padding-bottom: 12px; }
+                        a { color: %3; }
+                        img { max-width: 100%; height: auto; border-radius: 6px; margin: 16px 0; }
+                        pre, code { background: %4; padding: 4px 8px; border-radius: 4px; overflow-x: auto; }
+                    </style>`;
+                document.body.innerHTML = `<h1>${title}</h1>` + clone.innerHTML;
+                window.__modernQtReaderActive = true;
+                return "ENTER";
+            })();
+        )").arg(bgHex, fgHex, accentHex, isDark ? "#2a2a3c" : "#eef0f4");
+
+        view->page()->runJavaScript(js, [this](const QVariant &res) {
+            if (res.toString() == "ENTER") {
+                statusBar()->showMessage("Reader Mode enabled (click Reader icon again to exit)", 3000);
+            } else {
+                statusBar()->showMessage("Exited Reader Mode", 2000);
+            }
+        });
+    }
+
+    // Bundle C: Print / Export Current Page to PDF (Ctrl+P)
+    void savePageAsPdf() {
+        BrowserTabView *view = currentWebView();
+        if (!view) return;
+
+        QString defaultName = view->title().simplified().replace(QRegularExpression("[^a-zA-Z0-9_-]"), "_");
+        if (defaultName.isEmpty()) defaultName = "page";
+        QString filePath = QFileDialog::getSaveFileName(this, "Export Page to PDF",
+                                                        defaultName + ".pdf", "PDF Documents (*.pdf)");
+        if (filePath.isEmpty()) return;
+
+        statusBar()->showMessage("Generating PDF...", 3000);
+        view->page()->printToPdf(filePath);
+        connect(view->page(), &QWebEnginePage::pdfPrintingFinished, this,
+                [this](const QString &path, bool success) {
+            if (success) {
+                statusBar()->showMessage("Saved PDF to: " + path, 5000);
+            } else {
+                statusBar()->showMessage("Failed to save PDF", 4000);
+            }
+        }, Qt::SingleShotConnection);
+    }
+
+    // Bundle B: Fetch Live DuckDuckGo Search Autocomplete Suggestions
+    void fetchLiveSearchSuggestions() {
+        const QString query = m_urlBar->text().trimmed();
+        if (query.length() < 2 || query.contains("://") || query.contains(" | ")) {
+            return;
+        }
+
+        QUrl apiUrl("https://ac.duckduckgo.com/ac/");
+        QUrlQuery urlQuery;
+        urlQuery.addQueryItem("q", query);
+        urlQuery.addQueryItem("type", "list");
+        apiUrl.setQuery(urlQuery);
+
+        QNetworkRequest req(apiUrl);
+        req.setHeader(QNetworkRequest::UserAgentHeader, "ModernQtBrowser/2.0");
+        QNetworkReply *reply = m_suggestNetManager->get(req);
+
+        connect(reply, &QNetworkReply::finished, this, [this, reply, query]() {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) return;
+            if (m_urlBar->text().trimmed() != query) return;
+
+            QStringList livePhrases;
+            QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isArray() && doc.array().size() >= 2 && doc.array()[1].isArray()) {
+                for (const QJsonValue &val : doc.array()[1].toArray()) {
+                    const QString phrase = val.toString().trimmed();
+                    if (!phrase.isEmpty()) livePhrases << phrase;
+                    if (livePhrases.size() >= 5) break;
+                }
+            } else if (doc.isArray()) {
+                for (const QJsonValue &val : doc.array()) {
+                    if (val.isObject()) {
+                        const QString phrase = val.toObject().value("phrase").toString().trimmed();
+                        if (!phrase.isEmpty()) livePhrases << phrase;
+                        if (livePhrases.size() >= 5) break;
+                    }
+                }
+            }
+
+            if (!livePhrases.isEmpty()) {
+                rebuildOmniboxCompletions(livePhrases);
+                if (m_urlBar->hasFocus()) {
+                    m_urlCompleter->complete();
+                }
+            }
+        });
     }
 
     void showTabContextMenu(const QPoint &pos) {
@@ -619,13 +887,11 @@ private slots:
 
         QMenu menu(this);
 
-        // 1. Reload Tab
         menu.addAction(themeIcon("view-refresh", QStyle::SP_BrowserReload),
                        "Reload Tab", this, [webView]() {
             webView->reload();
         });
 
-        // 2. Duplicate Tab
         menu.addAction(themeIcon("tab-duplicate", QStyle::SP_FileDialogNewFolder),
                        "Duplicate Tab", this, [this, index, webView]() {
             addNewTab(webView->url());
@@ -634,14 +900,12 @@ private slots:
 
         menu.addSeparator();
 
-        // 3. Pin / Unpin Tab
         const bool pinned = isTabPinned(index);
         menu.addAction(themeIcon("window-pin", QStyle::SP_DialogApplyButton),
                        pinned ? "Unpin Tab" : "Pin Tab", this, [this, index]() {
             togglePinTab(index);
         });
 
-        // 4. Mute / Unmute Tab Audio
         const bool muted = webView->page()->isAudioMuted();
         menu.addAction(
             themeIcon(muted ? "audio-volume-high" : "audio-volume-muted",
@@ -651,9 +915,23 @@ private slots:
                 updateTabIcon(m_tabs->widget(index), webView);
             });
 
+        // Bundle A: Hibernate Tab option
+        const bool isDiscarded = webView->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded;
+        QAction *hibernateAct = menu.addAction(
+            themeIcon("system-suspend", QStyle::SP_ComputerIcon),
+            isDiscarded ? "Tab Hibernated (Memory Saved)" : "Hibernate Tab (Free Memory)",
+            this, [this, index]() { hibernateTab(index); });
+        hibernateAct->setEnabled(!isDiscarded && m_tabs->count() > 1);
+
         menu.addSeparator();
 
-        // 5. Close Other Tabs
+        QAction *reopenAct = menu.addAction(
+            themeIcon("edit-undo", QStyle::SP_ArrowBack),
+            "Reopen Closed Tab\tCtrl+Shift+T", this, [this]() { restoreClosedTab(); });
+        reopenAct->setEnabled(!m_closedTabs.isEmpty());
+
+        menu.addSeparator();
+
         QWidget *clickedWidget = m_tabs->widget(index);
         QAction *closeOthersAct = menu.addAction(
             themeIcon("tab-close-other", QStyle::SP_DialogCloseButton),
@@ -666,7 +944,6 @@ private slots:
             });
         closeOthersAct->setEnabled(m_tabs->count() > 1);
 
-        // 6. Close Tabs to the Right
         QAction *closeRightAct = menu.addAction(
             themeIcon("tab-close", QStyle::SP_DialogCloseButton),
             "Close Tabs to the Right", this, [this, index]() {
@@ -678,7 +955,6 @@ private slots:
             });
         closeRightAct->setEnabled(index < m_tabs->count() - 1);
 
-        // 7. Close This Tab
         menu.addAction(
             themeIcon("window-close", QStyle::SP_DialogCloseButton),
             "Close Tab\tCtrl+W", this, [this, index]() {
@@ -708,13 +984,14 @@ private slots:
 
     void bookmarkCurrentPage() {
         BrowserTabView *view = currentWebView();
-        if (!view) return;
+        if (!view || view->url().toString() == "about:newtab") return;
         QString entry = QString("%1 | %2").arg(view->title(), view->url().toString());
         if (m_bookmarksList->findItems(entry, Qt::MatchExactly).isEmpty()) {
             m_bookmarksList->addItem(entry);
             saveStoredData();
             rebuildOmniboxCompletions();
-            statusBar()->showMessage("Bookmark added", 2500);
+            rebuildBookmarksBar();
+            statusBar()->showMessage("Bookmark added to Library and Bookmarks Bar", 2500);
         }
     }
 
@@ -789,7 +1066,9 @@ private:
         int idx = m_tabs->indexOf(tabContainer);
         if (idx == -1 || !webView) return;
 
-        if (webView->page()->isAudioMuted()) {
+        if (webView->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
+            m_tabs->setTabIcon(idx, themeIcon("system-suspend", QStyle::SP_ComputerIcon));
+        } else if (webView->page()->isAudioMuted()) {
             m_tabs->setTabIcon(idx, themeIcon("audio-volume-muted", QStyle::SP_MediaVolumeMuted));
         } else if (webView->page()->recentlyAudible()) {
             m_tabs->setTabIcon(idx, themeIcon("audio-volume-high", QStyle::SP_MediaVolume));
@@ -842,14 +1121,153 @@ private:
         }
     }
 
-    // Rebuilds Omnibox QCompleter suggestions from Bookmarks and History
-    void rebuildOmniboxCompletions() {
+    // Bundle B: Generate and load KDE-Palette-Synced Speed Dial New Tab Page
+    void loadSpeedDial(BrowserTabView *webView) {
+        if (!webView) return;
+
+        const QString winBg = palette().color(QPalette::Window).name();
+        const QString cardBg = palette().color(QPalette::Base).name();
+        const QString textFg = palette().color(QPalette::Text).name();
+        const QString accent = palette().color(QPalette::Highlight).name();
+
+        QString cardsHtml;
+        // Populate cards from user's bookmarks first
+        int count = 0;
+        for (int i = 0; i < m_bookmarksList->count() && count < 8; ++i, ++count) {
+            const QString raw = m_bookmarksList->item(i)->text();
+            const QString title = raw.section(" | ", 0, -2).trimmed().toHtmlEscaped();
+            const QString url = raw.section(" | ", -1).trimmed().toHtmlEscaped();
+            cardsHtml += QString(R"(
+                <a class="card" href="%1">
+                    <div class="badge">%2</div>
+                    <div class="title">%3</div>
+                    <div class="url">%1</div>
+                </a>
+            )").arg(url, title.left(1).toUpper(), title);
+        }
+
+        // Seed default speed-dial cards if user has fewer than 4 bookmarks
+        struct QuickSite { const char *name; const char *url; };
+        const QuickSite defaults[] = {
+            {"Wikipedia", "https://www.wikipedia.org"},
+            {"KDE Community", "https://kde.org"},
+            {"GitHub", "https://github.com"},
+            {"DuckDuckGo", "https://duckduckgo.com"},
+            {"Qt Documentation", "https://doc.qt.io"},
+            {"Hacker News", "https://news.ycombinator.com"}
+        };
+        for (const auto &site : defaults) {
+            if (count >= 8) break;
+            cardsHtml += QString(R"(
+                <a class="card" href="%1">
+                    <div class="badge">%2</div>
+                    <div class="title">%3</div>
+                    <div class="url">%1</div>
+                </a>
+            )").arg(site.url, QString(site.name).left(1), site.name);
+            ++count;
+        }
+
+        QString html = QString(R"(
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>New Tab</title>
+                <style>
+                    * { box-sizing: border-box; }
+                    body {
+                        background-color: %1; color: %3;
+                        font-family: 'Noto Sans', system-ui, sans-serif;
+                        margin: 0; display: flex; flex-direction: column;
+                        align-items: center; justify-content: center; min-height: 92vh;
+                    }
+                    h1 { font-size: 28px; font-weight: 600; margin-bottom: 24px; letter-spacing: -0.5px; }
+                    form { width: 100%; max-width: 580px; margin-bottom: 40px; }
+                    input[type="text"] {
+                        width: 100%; padding: 14px 20px; border-radius: 10px;
+                        border: 2px solid rgba(128,128,128,0.25);
+                        background: %2; color: %3; font-size: 16px; outline: none;
+                        transition: border-color 0.15s;
+                    }
+                    input[type="text"]:focus { border-color: %4; }
+                    .grid {
+                        display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+                        gap: 16px; width: 100%; max-width: 720px; padding: 0 20px;
+                    }
+                    .card {
+                        background: %2; color: %3; text-decoration: none;
+                        padding: 18px 14px; border-radius: 10px;
+                        border: 1px solid rgba(128,128,128,0.18);
+                        display: flex; flex-direction: column; align-items: center;
+                        transition: transform 0.12s, border-color 0.12s;
+                    }
+                    .card:hover { transform: translateY(-3px); border-color: %4; }
+                    .badge {
+                        width: 42px; height: 42px; border-radius: 50%;
+                        background: %4; color: #fff; font-weight: 700; font-size: 18px;
+                        display: flex; align-items: center; justify-content: center;
+                        margin-bottom: 10px;
+                    }
+                    .title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+                    .url { font-size: 11px; opacity: 0.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; margin-top: 4px; }
+                </style>
+            </head>
+            <body>
+                <h1>ModernQtBrowser</h1>
+                <form action="https://duckduckgo.com/" method="GET">
+                    <input type="text" name="q" placeholder="Search DuckDuckGo or type a URL..." autofocus />
+                </form>
+                <div class="grid">%5</div>
+            </body>
+            </html>
+        )").arg(winBg, cardBg, textFg, accent, cardsHtml);
+
+        webView->setHtml(html, QUrl("about:newtab"));
+    }
+
+    // Bundle B: Rebuild Horizontal Bookmarks Toolbar
+    void rebuildBookmarksBar() {
+        if (!m_bookmarksBar) return;
+        m_bookmarksBar->clear();
+
+        const QIcon bmIcon = themeIcon("bookmarks", QStyle::SP_DialogYesButton);
+        if (m_bookmarksList->count() == 0) {
+            QAction *emptyAct = m_bookmarksBar->addAction(bmIcon, "Press Ctrl+D on any page to add bookmarks here");
+            emptyAct->setEnabled(false);
+            return;
+        }
+
+        for (int i = 0; i < qMin(m_bookmarksList->count(), 18); ++i) {
+            const QString raw = m_bookmarksList->item(i)->text();
+            const QString title = raw.section(" | ", 0, -2).trimmed();
+            const QString urlStr = raw.section(" | ", -1).trimmed();
+            QString shortLabel = title.left(20) + (title.length() > 20 ? "..." : "");
+
+            QAction *act = m_bookmarksBar->addAction(bmIcon, shortLabel, this, [this, urlStr]() {
+                if (auto *v = currentWebView()) v->setUrl(QUrl(urlStr));
+            });
+            act->setToolTip(title + "\n" + urlStr);
+        }
+    }
+
+    // Bundle B: Rebuild Omnibox QCompleter (Live Search + Bookmarks + History)
+    void rebuildOmniboxCompletions(const QStringList &liveSearchPhrases = {}) {
         if (!m_completerModel) return;
         m_completerModel->clear();
 
         QSet<QString> seenUrls;
 
-        // 1. Add Bookmarks first (with KDE Breeze bookmark icon)
+        // 1. Add Live DuckDuckGo Search Suggestions first
+        const QIcon searchIcon = themeIcon("edit-find", QStyle::SP_FileDialogContentsView);
+        for (const QString &phrase : liveSearchPhrases) {
+            const QString searchUrl = "https://duckduckgo.com/?q=" + QUrl::toPercentEncoding(phrase);
+            auto *item = new QStandardItem(searchIcon, QString("%1 — Search DuckDuckGo | %2").arg(phrase, searchUrl));
+            item->setData(searchUrl, Qt::UserRole);
+            m_completerModel->appendRow(item);
+        }
+
+        // 2. Add Bookmarks
         const QIcon bookmarkIcon = themeIcon("bookmarks", QStyle::SP_DialogYesButton);
         for (int i = 0; i < m_bookmarksList->count(); ++i) {
             const QString raw = m_bookmarksList->item(i)->text();
@@ -864,8 +1282,8 @@ private:
             m_completerModel->appendRow(item);
         }
 
-        // 2. Add History items next (with KDE Breeze history icon)
-        const QIcon historyIcon = themeIcon("view-history", QStyle::SP_FileDialogRecentView);
+        // 3. Add History
+        const QIcon historyIcon = themeIcon("view-history", QStyle::SP_FileDialogInfoView);
         for (int i = 0; i < m_historyList->count(); ++i) {
             const QString raw = m_historyList->item(i)->text();
             const QString url = raw.section(" | ", -1).trimmed();
@@ -885,6 +1303,48 @@ private:
         }
     }
 
+    // Bundle A: Save & Restore Open Session Tabs
+    void saveSession() {
+        if (m_isIncognito) return;
+        QSettings settings("ModernQt", "BrowserData");
+        QStringList urls;
+        QList<QVariant> pinnedFlags;
+        for (int i = 0; i < m_tabs->count(); ++i) {
+            if (auto *v = webViewAt(i)) {
+                QString u = v->url().toString();
+                urls << (u.isEmpty() ? "about:newtab" : u);
+                pinnedFlags << isTabPinned(i);
+            }
+        }
+        settings.setValue("session_urls", urls);
+        settings.setValue("session_pinned", pinnedFlags);
+        settings.setValue("session_active_index", m_tabs->currentIndex());
+        settings.setValue("bookmarks_bar_visible", m_bookmarksBarVisible);
+    }
+
+    bool restoreSession() {
+        if (m_isIncognito) return false;
+        QSettings settings("ModernQt", "BrowserData");
+        m_bookmarksBarVisible = settings.value("bookmarks_bar_visible", true).toBool();
+        m_bookmarksBar->setVisible(m_bookmarksBarVisible);
+
+        QStringList urls = settings.value("session_urls").toStringList();
+        QList<QVariant> pinnedFlags = settings.value("session_pinned").toList();
+        if (urls.isEmpty()) return false;
+
+        for (int i = 0; i < urls.size(); ++i) {
+            addNewTab(QUrl(urls[i]));
+            if (i < pinnedFlags.size() && pinnedFlags[i].toBool()) {
+                togglePinTab(m_tabs->count() - 1);
+            }
+        }
+        int activeIdx = settings.value("session_active_index", 0).toInt();
+        if (activeIdx >= 0 && activeIdx < m_tabs->count()) {
+            m_tabs->setCurrentIndex(activeIdx);
+        }
+        return true;
+    }
+
     QIcon themeIcon(const QString &breezeName, QStyle::StandardPixmap fallback) const {
         return QIcon::fromTheme(breezeName, style()->standardIcon(fallback));
     }
@@ -894,6 +1354,9 @@ private:
         if (url.scheme() == "https") {
             m_securityAction->setIcon(themeIcon("security-high", QStyle::SP_VistaShield));
             m_securityAction->setToolTip("Secure HTTPS Connection");
+        } else if (url.toString() == "about:newtab") {
+            m_securityAction->setIcon(themeIcon("go-home", QStyle::SP_DirHomeIcon));
+            m_securityAction->setToolTip("Speed Dial New Tab Page");
         } else {
             m_securityAction->setIcon(themeIcon("channel-insecure-symbolic", QStyle::SP_MessageBoxWarning));
             m_securityAction->setToolTip("Unencrypted Connection");
@@ -921,7 +1384,9 @@ private:
             })();
         )").arg(isDarkTheme ? "dark light" : "light dark"));
 
-        m_profile->scripts()->remove(m_profile->scripts()->find("SystemColorSchemeSync"));
+        for (const auto &s : m_profile->scripts()->find("SystemColorSchemeSync")) {
+            m_profile->scripts()->remove(s);
+        }
         m_profile->scripts()->insert(darkSchemeScript);
     }
 
@@ -966,7 +1431,7 @@ private:
     void setupUI() {
         setUnifiedTitleAndToolBarOnMac(true);
 
-        // 1. Native Navigation Toolbar with KDE Breeze Theme Icons
+        // 1. Primary Navigation Toolbar
         m_navBar = addToolBar("Navigation ToolBar");
         m_navBar->setMovable(false);
         m_navBar->setFloatable(false);
@@ -986,17 +1451,19 @@ private:
                 if (auto *v = currentWebView()) v->reload();
             });
         m_navBar->addAction(
-            themeIcon("go-home", QStyle::SP_DirHomeIcon), "Home", this, [this]() {
-                if (auto *v = currentWebView()) v->setUrl(QUrl("https://www.wikipedia.org"));
+            themeIcon("go-home", QStyle::SP_DirHomeIcon), "Speed Dial Home", this, [this]() {
+                if (auto *v = currentWebView()) loadSpeedDial(v);
             });
 
-        // 2. Native QLineEdit Omnibox with Auto-Complete & Embedded Actions
+        // 2. Omnibox with Live Search Autocomplete, Reader Mode, Bookmark & AdBlocker
         m_urlBar = new QLineEdit(this);
         m_urlBar->setClearButtonEnabled(true);
-        m_urlBar->setPlaceholderText("Search with DuckDuckGo or enter address...");
+        m_urlBar->setPlaceholderText("Search DuckDuckGo or enter address...");
         connect(m_urlBar, &QLineEdit::returnPressed, this, &BrowserWindow::navigateToInput);
+        connect(m_urlBar, &QLineEdit::textEdited, this, [this](const QString &) {
+            m_suggestDebounce->start();
+        });
 
-        // Configure Omnibox History & Bookmark Auto-Completer
         m_completerModel = new QStandardItemModel(this);
         m_urlCompleter = new QCompleter(m_completerModel, this);
         m_urlCompleter->setCaseSensitivity(Qt::CaseInsensitive);
@@ -1017,11 +1484,19 @@ private:
         m_securityAction = m_urlBar->addAction(
             themeIcon("security-high", QStyle::SP_VistaShield), QLineEdit::LeadingPosition);
 
+        // Bundle C: Reader Mode Toggle Action inside Omnibox
+        QAction *readerInlineAction = m_urlBar->addAction(
+            themeIcon("view-readermode", QStyle::SP_FileDialogContentsView), QLineEdit::TrailingPosition);
+        readerInlineAction->setToolTip("Toggle Distraction-Free Reader Mode (Ctrl+Alt+R)");
+        connect(readerInlineAction, &QAction::triggered, this, &BrowserWindow::toggleReaderMode);
+
+        // Bookmark Star Action inside Omnibox
         QAction *bookmarkInlineAction = m_urlBar->addAction(
             themeIcon("bookmarks", QStyle::SP_DialogYesButton), QLineEdit::TrailingPosition);
         bookmarkInlineAction->setToolTip("Bookmark this page (Ctrl+D)");
         connect(bookmarkInlineAction, &QAction::triggered, this, &BrowserWindow::bookmarkCurrentPage);
 
+        // AdBlock Shield Action inside Omnibox
         m_adBlockAction = m_urlBar->addAction(
             themeIcon("security-high", QStyle::SP_VistaShield), QLineEdit::TrailingPosition);
         m_adBlockAction->setToolTip("Toggle Ad & Tracker Blocker");
@@ -1043,7 +1518,7 @@ private:
         // 3. Right-side Toolbar Buttons
         m_navBar->addAction(
             themeIcon("view-sidetree", QStyle::SP_FileDialogDetailedView),
-            "Toggle Sidebar (Ctrl+H)", this, [this]() {
+            "Toggle Library Sidebar (Ctrl+H)", this, [this]() {
                 m_SideDock->setVisible(!m_SideDock->isVisible());
             });
 
@@ -1061,8 +1536,20 @@ private:
 
         QMenu *appMenu = new QMenu(menuButton);
         appMenu->addAction(themeIcon("tab-new", QStyle::SP_FileDialogNewFolder), "New Tab\tCtrl+T", this, [this]() { addNewTab(); });
+        appMenu->addAction(themeIcon("edit-undo", QStyle::SP_ArrowBack), "Reopen Closed Tab\tCtrl+Shift+T", this, [this]() { restoreClosedTab(); });
         appMenu->addAction(themeIcon("view-private", QStyle::SP_DialogResetButton), "New Private Window", this, []() {
             (new BrowserWindow(true))->show();
+        });
+        appMenu->addSeparator();
+        appMenu->addAction(themeIcon("bookmarks", QStyle::SP_DialogYesButton), "Toggle Bookmarks Bar\tCtrl+Shift+B", this, [this]() {
+            m_bookmarksBarVisible = !m_bookmarksBarVisible;
+            m_bookmarksBar->setVisible(m_bookmarksBarVisible);
+        });
+        appMenu->addAction(themeIcon("view-readermode", QStyle::SP_FileDialogContentsView), "Toggle Reader Mode\tCtrl+Alt+R", this, [this]() {
+            toggleReaderMode();
+        });
+        appMenu->addAction(themeIcon("document-print", QStyle::SP_DialogSaveButton), "Save Page as PDF...\tCtrl+P", this, [this]() {
+            savePageAsPdf();
         });
         appMenu->addSeparator();
         appMenu->addAction(themeIcon("edit-find", QStyle::SP_FileDialogContentsView), "Find in Page...\tCtrl+F", this, [this]() {
@@ -1078,7 +1565,15 @@ private:
         menuButton->setMenu(appMenu);
         m_navBar->addWidget(menuButton);
 
-        // 4. Bottom Find-in-Page Toolbar
+        // 4. Bundle B: Secondary Bookmarks Toolbar (Ctrl+Shift+B)
+        addToolBarBreak(Qt::TopToolBarArea);
+        m_bookmarksBar = addToolBar("Bookmarks Bar");
+        m_bookmarksBar->setMovable(false);
+        m_bookmarksBar->setFloatable(false);
+        m_bookmarksBar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        m_bookmarksBar->setIconSize(QSize(16, 16));
+
+        // 5. Bottom Find-in-Page Toolbar
         m_findBar = new QToolBar("Find", this);
         m_findBar->setMovable(false);
         addToolBar(Qt::BottomToolBarArea, m_findBar);
@@ -1096,7 +1591,7 @@ private:
             if (auto *v = currentWebView()) v->findText("");
         });
 
-        // 5. Central Native QTabWidget with Context Menu & Corner "+ New Tab" Button
+        // 6. Central Native QTabWidget with Context Menu & Corner "+ New Tab" Button
         m_tabs = new QTabWidget(this);
         m_tabs->setDocumentMode(true);
         m_tabs->setTabsClosable(true);
@@ -1115,23 +1610,32 @@ private:
         m_tabs->setCornerWidget(newTabButton, Qt::TopRightCorner);
 
         connect(m_tabs, &QTabWidget::tabCloseRequested, this, &BrowserWindow::closeTab);
-        connect(m_tabs, &QTabWidget::currentChanged, this, [this](int) {
+        connect(m_tabs, &QTabWidget::currentChanged, this, [this](int index) {
             if (auto *v = currentWebView()) {
-                m_urlBar->setText(v->url().toString());
+                // Wake up tab if it was hibernated
+                if (v->page()->lifecycleState() == QWebEnginePage::LifecycleState::Discarded) {
+                    v->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
+                    updateTabIcon(m_tabs->widget(index), v);
+                }
+                if (v->url().toString() == "about:newtab") {
+                    m_urlBar->clear();
+                } else {
+                    m_urlBar->setText(v->url().toString());
+                }
                 updateSecurityIcon(v->url());
                 updateNavigationActions();
             }
         });
         setCentralWidget(m_tabs);
 
-        // 6. Native Status Bar & Slim Progress Indicator
+        // 7. Native Status Bar & Slim Progress Indicator
         m_progressBar = new QProgressBar(this);
         m_progressBar->setMaximumWidth(140);
         m_progressBar->setMaximumHeight(12);
         m_progressBar->setTextVisible(false);
         statusBar()->addPermanentWidget(m_progressBar);
 
-        // 7. Native QDockWidget for History, Bookmarks & Downloads
+        // 8. Native QDockWidget for History, Bookmarks & Downloads
         m_SideDock = new QDockWidget("Library", this);
         QTabWidget *dockTabs = new QTabWidget(m_SideDock);
         dockTabs->setDocumentMode(true);
@@ -1174,7 +1678,7 @@ private:
         m_downloadsList = new QListWidget();
         m_downloadsList->setAlternatingRowColors(true);
 
-        dockTabs->addTab(historyPage, themeIcon("view-history", QStyle::SP_FileDialogRecentView), "History");
+        dockTabs->addTab(historyPage, themeIcon("view-history", QStyle::SP_FileDialogInfoView), "History");
         dockTabs->addTab(m_bookmarksList, themeIcon("bookmarks", QStyle::SP_DialogYesButton), "Bookmarks");
         dockTabs->addTab(m_downloadsList, themeIcon("folder-download", QStyle::SP_ArrowDown), "Downloads");
 
@@ -1185,9 +1689,16 @@ private:
 
     void setupShortcuts() {
         new QShortcut(QKeySequence("Ctrl+T"), this, [this]() { addNewTab(); });
+        new QShortcut(QKeySequence("Ctrl+Shift+T"), this, [this]() { restoreClosedTab(); });
         new QShortcut(QKeySequence("Ctrl+W"), this, [this]() { closeTab(m_tabs->currentIndex()); });
         new QShortcut(QKeySequence("Ctrl+L"), this, [this]() { m_urlBar->setFocus(); m_urlBar->selectAll(); });
         new QShortcut(QKeySequence("Ctrl+D"), this, [this]() { bookmarkCurrentPage(); });
+        new QShortcut(QKeySequence("Ctrl+Shift+B"), this, [this]() {
+            m_bookmarksBarVisible = !m_bookmarksBarVisible;
+            m_bookmarksBar->setVisible(m_bookmarksBarVisible);
+        });
+        new QShortcut(QKeySequence("Ctrl+Alt+R"), this, [this]() { toggleReaderMode(); });
+        new QShortcut(QKeySequence("Ctrl+P"), this, [this]() { savePageAsPdf(); });
         new QShortcut(QKeySequence("Ctrl+H"), this, [this]() { m_SideDock->setVisible(!m_SideDock->isVisible()); });
         new QShortcut(QKeySequence("Ctrl+M"), this, [this]() {
             int idx = m_tabs->currentIndex();
@@ -1225,6 +1736,7 @@ private:
         m_historyList->addItems(settings.value("history").toStringList());
         m_bookmarksList->addItems(settings.value("bookmarks").toStringList());
         rebuildOmniboxCompletions();
+        rebuildBookmarksBar();
     }
 
     void saveStoredData() {
@@ -1240,11 +1752,16 @@ private:
     }
 
     bool m_isIncognito;
+    bool m_bookmarksBarVisible = true;
+    QStack<QUrl> m_closedTabs;
+    QNetworkAccessManager *m_suggestNetManager = nullptr;
+    QTimer *m_suggestDebounce = nullptr;
     QWebEngineProfile *m_profile = nullptr;
     AdBlockInterceptor *m_adBlocker = nullptr;
     QAction *m_adBlockAction = nullptr;
     QAction *m_securityAction = nullptr;
     QToolBar *m_navBar = nullptr;
+    QToolBar *m_bookmarksBar = nullptr;
     QToolBar *m_findBar = nullptr;
     QLineEdit *m_urlBar = nullptr;
     QCompleter *m_urlCompleter = nullptr;
@@ -1290,7 +1807,7 @@ Exec=ModernQtBrowser %U
 Icon=modernqtbrowser
 Terminal=false
 Categories=Network;WebBrowser;Qt;KDE;
-MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+MimeType=text/html;application/pdf;x-scheme-handler/http;x-scheme-handler/https;
 EOF
 
     cat << 'EOF' > "${PROJECT_DIR}/packaging/LICENSE.txt"
@@ -1458,7 +1975,7 @@ clean_build() {
 # ------------------------------------------------------------------------------
 choose_action() {
     if command -v whiptail >/dev/null 2>&1; then
-        CHOICE=$(whiptail --title "ModernQtBrowser (KDE Edition) - Builder" \
+        CHOICE=$(whiptail --title "ModernQtBrowser v2.0 (KDE Edition) - Builder" \
             --menu "Choose an action to perform:" 20 76 10 \
             "1" "Generate / Update Project Source Files Only" \
             "2" "Install Linux Dependencies (apt / dnf / pacman)" \
@@ -1470,7 +1987,7 @@ choose_action() {
             "0" "Exit" 3>&1 1>&2 2>&3) || CHOICE="0"
     else
         echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════╗${RESET}"
-        echo -e "${BLUE}║${RESET}   ${BOLD}🌐 ModernQtBrowser (KDE Edition) - Automated Builder${RESET}           ${BLUE}║${RESET}"
+        echo -e "${BLUE}║${RESET}   ${BOLD}🌐 ModernQtBrowser v2.0 (KDE Edition) - Automated Builder${RESET}      ${BLUE}║${RESET}"
         echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${RESET}"
         echo -e "${BLUE}║${RESET}  ${CYAN}1)${RESET} Generate / Update Project Source Files Only                ${BLUE}║${RESET}"
         echo -e "${BLUE}║${RESET}  ${CYAN}2)${RESET} Install Linux Dependencies (Ubuntu / Fedora / Arch)        ${BLUE}║${RESET}"
