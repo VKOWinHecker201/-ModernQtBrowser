@@ -1,6 +1,6 @@
 # ModernQtBrowser
 
-ModernQtBrowser is a native desktop web browser written in C++17 using the Qt 6 framework. It combines the Chromium rendering engine with native desktop widgets to deliver a fast, memory-efficient, and privacy-focused browsing experience that integrates directly with the host operating system and KDE Plasma themes.
+ModernQtBrowser is a native desktop web browser written in C++17 using the Qt 6 framework. It combines the Chromium rendering engine with native desktop widgets to deliver a fast, memory-efficient, and privacy-hardened browsing experience that integrates directly with the host operating system and KDE Plasma themes.
 
 This project was vibecoded by Gemini Argon.
 
@@ -11,33 +11,42 @@ This project was vibecoded by Gemini Argon.
 ### Rendering Engine
 ModernQtBrowser is built on **Qt WebEngine** (`QtWebEngineCore` and `QtWebEngineWidgets`), which embeds the **Chromium** browser platform (the Blink layout engine and the V8 JavaScript engine) into native Qt C++ classes. Process isolation, sandboxing, GPU-accelerated rendering, and network socket management are handled through Chromium's multi-process `QtWebEngineProcess` architecture.
 
-### Core Implementation Details (v0.2.0)
-* **Native System and KDE Plasma Theme Integration**: Instead of hardcoding custom QSS stylesheets, the browser uses the native system `QStyle` and `QPalette`. Under KDE Plasma, it automatically adopts the Breeze widget style and `QIcon::fromTheme()` Freedesktop icon specifications. The main window listens for `QEvent::PaletteChange` and `QEvent::ApplicationPaletteChange` events to synchronize Chromium's `prefers-color-scheme` CSS media query and the internal Speed Dial dashboard with the active desktop light or dark color scheme in real time.
-* **Network-Level Ad and Tracker Blocker**: Subclasses `QWebEngineUrlRequestInterceptor` (`AdBlockInterceptor`) to inspect every HTTP and HTTPS request on Chromium's network IO thread before dispatch. It aborts HTML5 `<a ping>` click-tracking requests, appends `DNT: 1` and `Sec-GPC: 1` privacy headers, and checks request hostnames in O(1) time against a `QSet<QString>` hash table protected by a `QReadWriteLock`.
-* **Automated EasyList Synchronization**: Uses `QNetworkAccessManager` to download and parse EasyList filter rules into `QStandardPaths::AppDataLocation`. The local cache (`easylist_cache.txt`) is loaded immediately at startup and refreshed automatically in the background when the file is older than 24 hours.
-* **Cosmetic DOM Filtering**: Injects a `QWebEngineScript` (`CosmeticAdBlock`) at `DocumentReady` across main frames and subframes to collapse empty ad containers and placeholder iframes via CSS selectors.
-* **Session Continuity and Tab Hibernation**: Overrides `QMainWindow::closeEvent()` to serialize all open tab URLs, pinned states, active tab index, and toolbar visibility into `QSettings` for automatic restoration on startup. Closed tabs are tracked in a `QStack<QUrl>` so they can be reopened in reverse order (`Ctrl+Shift+T`). Background tabs can be hibernated using `QWebEnginePage::LifecycleState::Discarded` to release Chromium renderer memory while keeping the tab entry on the bar, automatically waking when selected.
-* **KDE-Synced Speed Dial (`about:newtab`)**: Generates a local HTML/CSS dashboard styled dynamically with the system `QPalette` (`QPalette::Window`, `QPalette::Base`, `QPalette::Text`, and `QPalette::Highlight`), displaying a DuckDuckGo search bar and quick-launch cards populated from user bookmarks.
-* **Hybrid Omnibox Auto-Completion**: Attaches a `QCompleter` backed by a `QStandardItemModel` (`Qt::MatchContains` and `Qt::CaseInsensitive`) to the address bar. Keystrokes are debounced with a 180ms `QTimer` to query DuckDuckGo's live autocomplete API (`ac.duckduckgo.com`) via `QNetworkAccessManager`, merging live search suggestions with local bookmarks and browsing history.
-* **Hardware and Feature Permission Prompts**: Connects to `QWebEnginePage::permissionRequested` (Qt 6.8+) and `featurePermissionRequested` to display native confirmation dialogs when websites request access to the camera, microphone, screen sharing, geolocation, notifications, or clipboard.
-* **Distraction-Free Reader Mode**: Injects an on-demand DOM extraction script (`toggleReaderMode()`) that isolates primary `<article>` or `<main>` content, strips navigation clutter and third-party scripts, and formats the text using the system color palette.
-* **Built-In PDF Viewing and Export**: Enables Chromium's internal PDF viewer plugin (`QWebEngineSettings::PdfViewerEnabled`) to render `.pdf` files natively inside tabs, and integrates `QWebEnginePage::printToPdf()` (`Ctrl+P`) to export any webpage into a standalone PDF document.
+### Core Implementation Details (v3.0)
+* **Native System and KDE Plasma Theme Integration**: Instead of overriding widgets with hardcoded QSS stylesheets, the browser uses the native system `QStyle` and `QPalette`. Under KDE Plasma, it automatically adopts the Breeze widget style and `QIcon::fromTheme()` Freedesktop icon specifications. The main window listens for `QEvent::PaletteChange` and `QEvent::ApplicationPaletteChange` events to synchronize Chromium's `prefers-color-scheme` CSS media query and the internal Speed Dial dashboard with the active desktop light or dark color scheme in real time.
+* **SQLite Storage Engine with Frecency Ranking**: Uses `Qt6::Sql` (`QSqlDatabase` with the `QSQLITE` driver) to store browsing history, visit counts, timestamps, bookmarks, and per-site ad-blocker whitelist rules inside `browser.db`. Omnibox autocomplete suggestions query the SQLite database ordered by visit frequency and recency (`ORDER BY visit_count DESC, last_visited DESC`).
+* **Network-Level Ad and Tracker Blocker with Per-Site Whitelist**: Subclasses `QWebEngineUrlRequestInterceptor` (`AdBlockInterceptor`) to inspect every HTTP and HTTPS request on Chromium's network IO thread before dispatch. It aborts HTML5 `<a ping>` click-tracking requests, appends `DNT: 1` and `Sec-GPC: 1` privacy headers, and checks request hostnames in O(1) time against a `QSet<QString>` hash table protected by a `QReadWriteLock`. Users can whitelist specific domains, which are persisted in the SQLite `whitelist` table.
+* **Automated EasyList Synchronization and Cosmetic Filtering**: Uses `QNetworkAccessManager` to download and parse EasyList filter rules into `QStandardPaths::AppDataLocation`. The local cache (`easylist_cache.txt`) is loaded immediately at startup and refreshed automatically in the background when the file is older than 24 hours. A companion `QWebEngineScript` (`CosmeticAdBlock`) is injected at `DocumentReady` across main frames and subframes to collapse empty DOM ad placeholders.
+* **Multi-Account Container Tabs**: Supports isolated browsing contexts (`Personal`, `Work`, `Banking`, and `Shopping`) by dynamically instantiating separate named `QWebEngineProfile` instances (`ModernQtContainer_<Name>`). Each container maintains its own isolated cookie store, HTTP cache, and persistent storage, allowing simultaneous logins to multiple accounts on the same website in adjacent tabs.
+* **Split-Screen Tile View**: Each tab hosts a nested horizontal `QSplitter` inside its container, allowing two independent `BrowserTabView` instances to run side-by-side within a single tab (`Ctrl+Shift+S`). Focus tracking via `QWidget::focusInEvent` automatically binds the Omnibox address bar and navigation controls to whichever split pane is currently active.
+* **Command Palette (`Ctrl+K` / `Ctrl+Shift+P`)**: Implements a keyboard-driven modal popup (`QDialog` with `Qt::Popup | Qt::FramelessWindowHint`) that fuzzy-searches across all open tabs, saved bookmarks, and internal browser commands for instant tab switching and action execution.
+* **Userscript Extension Engine (`*.user.js`)**: Scans the `userscripts/` directory inside `QStandardPaths::AppDataLocation` at startup, parses script injection timing (`@run-at document-start` vs `document-end`), and registers each `.user.js` file inside the profile's `QWebEngineScriptCollection`. Includes a management panel in the Library dock to open the scripts folder and hot-reload scripts at runtime.
+* **Hybrid Omnibox with Search Bangs and Live Autocomplete**: Attaches a `QCompleter` backed by a `QStandardItemModel` (`Qt::MatchContains` and `Qt::CaseInsensitive`) to the address bar. Keystrokes are debounced with a 180ms `QTimer` to query DuckDuckGo's live autocomplete API (`ac.duckduckgo.com`), merging live search phrases with bookmarks and SQLite frecency-ranked history. Also parses direct search engine bangs (`!yt`, `!gh`, `!w`, `!g`, `!aw`, `!so`, `!r`).
+* **WebRTC, Canvas Fingerprint Hardening, and Permission Prompts**: Enables `QWebEngineSettings::WebRTCPublicInterfacesOnly` and disables DNS prefetching to prevent local IP address leaks. Injects a `DocumentCreation` script into `MainWorld` that applies subtle noise to `HTMLCanvasElement.prototype.toDataURL` to mitigate canvas fingerprinting. Hardware access requests (Camera, Microphone, Screen Sharing, Geolocation, Notifications, Clipboard) trigger native confirmation dialogs via `QWebEnginePage::permissionRequested` (Qt 6.8+) or `featurePermissionRequested`.
+* **Session Continuity and Tab Hibernation**: Serializes open tab URLs, container assignments, pinned states, active tab index, and toolbar visibility on exit for automatic restoration on startup. Closed tabs are stored in a `QStack<QUrl>` for `Ctrl+Shift+T` recovery. Background tabs can be suspended via `QWebEnginePage::LifecycleState::Discarded` to release Chromium renderer memory while retaining the tab entry on the bar.
+* **Reader Mode, Picture-in-Picture, PDF Export, Screenshots, and Mouse Gestures**: Provides on-demand DOM extraction for distraction-free reading (`Ctrl+Alt+R`), HTML5 video Picture-in-Picture popouts (`Ctrl+Shift+V`), native PDF viewing (`PdfViewerEnabled`) and webpage-to-PDF export (`Ctrl+P`), viewport screenshots copied to the system clipboard and saved to `~/Pictures/ModernQtBrowser/` (`Ctrl+Shift+Y`), and right-click drag mouse gestures for navigation.
 
 ---
 
 ## Features
 
 * Multi-tab browsing with movable tabs, pinned tabs, duplicate tab action, and automatic audio/mute status icons
-* Session restore on startup and recently closed tab recovery (`Ctrl+Shift+T`)
-* Tab hibernation (`QWebEnginePage::LifecycleState::Discarded`) to suspend background tabs and free RAM
+* Multi-account container tabs (`Personal`, `Work`, `Banking`, `Shopping`) with isolated cookies and storage
+* Split-screen side-by-side tile view (`Ctrl+Shift+S`) inside any tab
+* Spotlight-style Command Palette (`Ctrl+K` / `Ctrl+Shift+P`) to search open tabs, bookmarks, and browser actions
+* SQLite database storage engine (`browser.db`) with frecency-ranked Omnibox autocomplete suggestions
+* Omnibox search bangs (`!yt`, `!gh`, `!w`, `!g`, `!aw`, `!so`, `!r`) and live DuckDuckGo autocomplete suggestions
+* Greasemonkey / Tampermonkey compatible `*.user.js` Userscript loader and sidebar manager
+* Network-level ad and tracker blocker with EasyList auto-updates and per-site domain whitelisting
+* WebRTC local IP leak protection, canvas anti-fingerprinting, and one-click cookie/cache clearing
+* Session restore on startup, recently closed tab recovery (`Ctrl+Shift+T`), and tab hibernation (`LifecycleState::Discarded`)
 * KDE-themed `about:newtab` Speed Dial dashboard and toggleable horizontal Bookmarks Bar (`Ctrl+Shift+B`)
-* Smart Omnibox with URL detection, live DuckDuckGo search autocomplete, and history/bookmark suggestions
-* Built-in network ad and tracker blocker with one-click shield toggle and EasyList auto-updates
-* Distraction-free Reader Mode (`Ctrl+Alt+R`) for articles and documentation
+* Distraction-free Reader Mode (`Ctrl+Alt+R`) and floating Picture-in-Picture video mode (`Ctrl+Shift+V`)
+* Viewport screenshot capture (`Ctrl+Shift+Y`) to clipboard and disk
+* Right-click drag mouse gestures (Back, Forward, Scroll to Top)
 * Native permission dialogs for Camera, Microphone, Screen Sharing, Geolocation, and Desktop Notifications
 * Built-in PDF viewer and webpage-to-PDF export (`Ctrl+P`)
 * Private browsing windows backed by isolated, off-the-record `QWebEngineProfile` instances in memory
-* Dockable Library sidebar (`Ctrl+H`) with searchable history, bookmarks, and a download manager with progress bars
+* Dockable Library sidebar (`Ctrl+H`) with tabs for History, Bookmarks, Downloads, and Userscripts
 * Split-screen Chromium Developer Tools inspector (`F12`) and in-page text finder (`Ctrl+F`)
 
 ---
@@ -48,8 +57,8 @@ ModernQtBrowser is built on **Qt WebEngine** (`QtWebEngineCore` and `QtWebEngine
 ModernQtBrowser/
 ├── build.sh                        # Automated project generator and interactive build script
 └── ModernQtBrowser/                # Generated source directory
-    ├── CMakeLists.txt              # CMake build, deployment, and CPack/NSIS configuration
-    ├── main.cpp                    # Complete v2.0 browser and ad-blocker implementation
+    ├── CMakeLists.txt              # CMake build, Qt6::Sql, deployment, and CPack/NSIS configuration
+    ├── main.cpp                    # Complete v3.0 browser, SQLite engine, and ad-blocker implementation
     ├── packaging/
     │   ├── LICENSE.txt             # MIT License file for NSIS installer
     │   ├── icon.png                # 256x256 application icon
@@ -59,25 +68,51 @@ ModernQtBrowser/
 
 ---
 
-## Keyboard Shortcuts
+## Keyboard Shortcuts, Search Bangs, and Mouse Gestures
+
+### Keyboard Shortcuts
 
 | Shortcut | Action |
 | :--- | :--- |
 | `Ctrl + T` | Open a new Speed Dial tab (`about:newtab`) |
 | `Ctrl + Shift + T` | Reopen the most recently closed tab |
 | `Ctrl + W` | Close the current tab (unpinned tabs only) |
+| `Ctrl + K` or `Ctrl + Shift + P` | Open the Command Palette and Quick Tab Switcher |
+| `Ctrl + Shift + S` | Toggle Split-Screen side-by-side view inside the active tab |
+| `Ctrl + Shift + Y` | Capture a viewport screenshot to clipboard and `~/Pictures/ModernQtBrowser/` |
+| `Ctrl + Shift + V` | Toggle Picture-in-Picture (PiP) floating video window |
 | `Ctrl + L` | Focus and highlight the Omnibox address bar |
-| `Ctrl + D` | Bookmark the active page (adds to Library and Bookmarks Bar) |
+| `Ctrl + D` | Bookmark the active page (saves to SQLite and Bookmarks Bar) |
 | `Ctrl + Shift + B` | Show or hide the horizontal Bookmarks Bar |
 | `Ctrl + Alt + R` | Toggle distraction-free Reader Mode on the active page |
 | `Ctrl + P` | Export / save the active webpage as a PDF file |
 | `Ctrl + M` | Mute or unmute audio on the active tab |
-| `Ctrl + H` | Toggle the Library sidebar (History, Bookmarks, Downloads) |
+| `Ctrl + H` | Toggle the Library sidebar (History, Bookmarks, Downloads, Userscripts) |
 | `Ctrl + F` | Open the Find-in-Page search bar |
-| `Escape` | Close the Find-in-Page search bar |
+| `Escape` | Close the Find-in-Page bar or Command Palette |
 | `F12` | Toggle the split-screen Chromium Developer Tools inspector |
 | `Ctrl + +` / `Ctrl + -` | Zoom in or zoom out |
 | `Ctrl + 0` | Reset page zoom to 100% |
+
+### Omnibox Search Bangs
+
+| Bang Prefix | Target Search Engine | Example Omnibox Input |
+| :--- | :--- | :--- |
+| `!yt <query>` | YouTube | `!yt qt6 c++ tutorial` |
+| `!gh <query>` | GitHub | `!gh kde/breeze` |
+| `!w <query>` | Wikipedia | `!w chromium blink` |
+| `!g <query>` | Google | `!g cmake generator expressions` |
+| `!aw <query>` | Arch Linux Wiki | `!aw pipewire` |
+| `!so <query>` | Stack Overflow | `!so qwebengineview createwindow` |
+| `!r <query>` | Reddit | `!r linux_gaming` |
+
+### Mouse Gestures
+
+| Gesture | Action |
+| :--- | :--- |
+| Hold Right-Click + Drag Left | Navigate Back in history |
+| Hold Right-Click + Drag Right | Navigate Forward in history |
+| Hold Right-Click + Drag Up | Smooth-scroll to the top of the page |
 
 ---
 
@@ -89,7 +124,7 @@ ModernQtBrowser/
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake ninja-build wget file imagemagick \
-                    qt6-base-dev qt6-webengine-dev qmake6 breeze-icon-theme
+                    qt6-base-dev qt6-webengine-dev libqt6sql6-sqlite qmake6 breeze-icon-theme
 ```
 
 **Fedora:**
@@ -129,7 +164,7 @@ cmake --build . --parallel
 ## Creating a Portable Linux AppImage
 
 ### 1. Generate the AppImage
-To bundle the browser, its Qt 6 WebEngine libraries, `QtWebEngineProcess`, and resource packs into a single portable `.AppImage` file:
+To bundle the browser, its Qt 6 WebEngine and SQLite libraries, `QtWebEngineProcess`, and resource packs into a single portable `.AppImage` file:
 
 * **Via `build.sh`**: Run `./build.sh` and select **Option 4 (Build Portable Linux .AppImage)**.
 * **Manually**:
@@ -246,16 +281,21 @@ If you want to compile the Windows `.exe` locally on your Linux machine without 
 1. Install **Visual Studio 2022** (with the **Desktop development with C++** workload), **Qt 6 (MSVC 2022 64-bit + Qt WebEngine)**, and **NSIS**.
 2. Open **Git Bash** from an **x64 Native Tools Command Prompt for VS 2022**.
 3. Run `./build.sh` and select **Option 5 (Build Windows .exe + NSIS Installer)**.
-4. The script compiles `ModernQtBrowser.exe`, runs `windeployqt.exe` to bundle the required Qt DLLs and `QtWebEngineProcess.exe`, and executes `cpack` to generate `ModernQtBrowser-2.0.0-win64.exe`.
+4. The script compiles `ModernQtBrowser.exe`, runs `windeployqt.exe` to bundle the required Qt DLLs, SQLite driver, and `QtWebEngineProcess.exe`, and executes `cpack` to generate `ModernQtBrowser-3.0.0-win64.exe`.
 
 ---
 
 ## Runtime Storage Locations
 
+* **Linux SQLite Database (History, Bookmarks, Whitelist)**: `~/.local/share/ModernQtBrowser/browser.db`
+* **Linux Userscripts Directory (`*.user.js`)**: `~/.local/share/ModernQtBrowser/userscripts/`
 * **Linux EasyList Cache**: `~/.local/share/ModernQtBrowser/easylist_cache.txt`
-* **Linux History, Bookmarks, and Session State**: `~/.config/ModernQt/BrowserData.conf`
+* **Linux Session State Configuration**: `~/.config/ModernQt/BrowserData.conf`
+* **Linux Saved Screenshots**: `~/Pictures/ModernQtBrowser/`
+* **Windows SQLite Database**: `%LOCALAPPDATA%\ModernQtBrowser\browser.db`
+* **Windows Userscripts Directory**: `%LOCALAPPDATA%\ModernQtBrowser\userscripts\`
 * **Windows EasyList Cache**: `%LOCALAPPDATA%\ModernQtBrowser\easylist_cache.txt`
-* **Windows History, Bookmarks, and Session State**: `HKEY_CURRENT_USER\Software\ModernQt\BrowserData`
+* **Windows Session State Configuration**: `HKEY_CURRENT_USER\Software\ModernQt\BrowserData`
 
 ---
 
